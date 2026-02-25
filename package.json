@@ -1,0 +1,19 @@
+
+{
+  "name": "discord-rpg-bot-zhhant",
+  "version": "1.0.0",
+  "description": "Discord RPG 等級/職業/抽獎 Bot（繁體中文，免寫程式，含每日登入抽獎、冒險、語音/文字 EXP、稱號自動授予）",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5",
+    "mongoose": "^8.3.2",
+    "node-cron": "^3.0.3"
+  }
+}
