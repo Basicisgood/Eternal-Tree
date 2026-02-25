@@ -9,7 +9,7 @@ const guildConfigSchema = new mongoose.Schema({
   messageCooldownSec: { type: Number, default: 60 },
   voiceBlockMinutes: { type: Number, default: 30 },
   voicePerBlockExp: { type: Number, default: 50 },
-  announceChannelName: { type: String, default: '🎬任務大廳' }
+  announceChannelName: { type: String, default: '任務大廳' }
 }, { timestamps: true });
 
 module.exports = { GuildConfig: mongoose.model('GuildConfig', guildConfigSchema) };
