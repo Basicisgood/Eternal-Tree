@@ -15,7 +15,7 @@ const { LOGIN_LOOT_TABLE, drawFromLootTable } = require('./utils/loot');
 const { CLASS_LINES, getTitleForLevel } = require('./utils/titles');
 
 const GUILD_ID = process.env.GUILD_ID;
-const ANNOUNCE_CHANNEL_NAME = process.env.ANNOUNCE_CHANNEL_NAME || '🎬任務大廳';
+const ANNOUNCE_CHANNEL_NAME = process.env.ANNOUNCE_CHANNEL_NAME || '任務大廳';
 
 const client = new Client({
   intents: [
