@@ -1,4 +1,5 @@
 
+
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 
 module.exports = {
@@ -17,8 +18,8 @@ module.exports = {
     const embed = new EmbedBuilder()
       .setColor(0x8E24AA)
       .setTitle(`${interaction.user.username} 的背包（最近 20 筆）`)
-      .setDescription(lines.join('
-'))
+      // 這一行是本次錯誤的關鍵修正：一定要用 '\n' 作為換行
+      .setDescription(lines.join('\n'))
       .setTimestamp();
 
     await interaction.reply({ embeds: [embed], ephemeral: true });
