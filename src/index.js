@@ -226,3 +226,20 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 client.login(process.env.DISCORD_TOKEN);
+
+// 引入 Express
+const express = require("express");
+const app = express();
+
+// Render 會提供 PORT 環境變數，預設用 3000
+const PORT = process.env.PORT || 3000;
+
+// 建立一個簡單的路由，顯示 Bot 狀態
+app.get("/", (req, res) => {
+  res.send("Discord Bot is running");
+});
+
+// 啟動伺服器
+app.listen(PORT, () => {
+  console.log(`HTTP server listening on port ${PORT}`);
+});
