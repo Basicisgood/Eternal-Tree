@@ -239,6 +239,8 @@ app.get("/", (req, res) => {
   res.send("Discord Bot is running");
 });
 
+
+
 // 啟動伺服器
 app.listen(PORT, () => {
   console.log(`HTTP server listening on port ${PORT}`);
