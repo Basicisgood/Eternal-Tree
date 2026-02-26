@@ -2,7 +2,7 @@ name: Render Redeploy (every 30 min)
 
 on:
   schedule:
-    - cron: "*/15 * * * *" # 每 30 分钟，UTC 时区
+    - cron: "*/30 * * * *" # 每 30 分钟，UTC 时区
   workflow_dispatch:       # 允许手动触发
 
 jobs:
