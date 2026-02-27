@@ -1,21 +1,21 @@
-name: Render Redeploy (every 30 min)
+# name: Render Redeploy (every 30 min)
 
-on:
-  schedule:
-    - cron: "*/15 * * * *" # 每 15 分钟，UTC 时区
-  workflow_dispatch:       # 允许手动触发
+# on:
+#   schedule:
+#     - cron: "*/15 * * * *" # 每 15 分钟，UTC 时区
+#   workflow_dispatch:       # 允许手动触发
 
-jobs:
-  redeploy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger Render deploy via Deploy Hook
-        env:
-          DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
-        run: |
-          if [ -z "$DEPLOY_HOOK" ]; then
-            echo "Missing RENDER_DEPLOY_HOOK_URL secret"
-            exit 1
-          fi
-          # 使用 GET 或 POST 均可
-          curl -fsS -X POST "$DEPLOY_HOOK"
+# jobs:
+#   redeploy:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Trigger Render deploy via Deploy Hook
+#         env:
+#           DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+#         run: |
+#           if [ -z "$DEPLOY_HOOK" ]; then
+#             echo "Missing RENDER_DEPLOY_HOOK_URL secret"
+#             exit 1
+#           fi
+#           # 使用 GET 或 POST 均可
+#           curl -fsS -X POST "$DEPLOY_HOOK"
