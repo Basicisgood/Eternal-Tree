@@ -1,5 +1,8 @@
 
+// index.js
 require('dotenv').config();
+
+const express = require('express');
 const { Client, GatewayIntentBits, Partials, Collection, EmbedBuilder, PermissionsBitField, ChannelType } = require('discord.js');
 const mongoose = require('mongoose');
 const cron = require('node-cron');
@@ -8,7 +11,7 @@ const fs = require('fs');
 
 const { User } = require('./models/user');
 const { GuildConfig } = require('./models/config');
-const { addExpWithDailyCap, expNeededForNextLevel, LEVEL_CAP } = require('./utils/exp');
+const { addExpWithDailyCap, expNeededForNextLevel /*, LEVEL_CAP*/ } = require('./utils/exp');
 const { ensureAnnounceChannelByName, sendToAnnounce } = require('./utils/channel');
 const { onLevelMilestoneUpdateRoles } = require('./utils/roles');
 const { LOGIN_LOOT_TABLE, drawFromLootTable } = require('./utils/loot');
@@ -17,9 +20,29 @@ const { CLASS_LINES, getTitleForLevel } = require('./utils/titles');
 const GUILD_ID = process.env.GUILD_ID;
 const ANNOUNCE_CHANNEL_NAME = process.env.ANNOUNCE_CHANNEL_NAME || '任務大廳';
 
+/* -------------------------- Express: Web Service -------------------------- */
+// 單一 Express 實例，提供 /health 與 /ping 端點（Render 健康檢查請指向 /health）
+const app = express();
+
+app.get('/health', (req, res) => {
+  // ✅ 輕量健康檢查：回 200 即可（建議不要做昂貴操作，以免誤判故障）
+  res.status(200).send('OK');
+});
+
+// 可選：人工/外部監測使用
+app.get('/ping', (req, res) => res.status(200).send('pong'));
+
+// 可選：根路由
+app.get('/', (req, res) => res.send('Discord Bot is running'));
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`HTTP server listening on :${PORT}`));
+
+/* --------------------------- Discord Bot 啟動 ---------------------------- */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    // 你已啟用以下 privileged intents，請確保在 Discord Developer Portal 也勾選
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
@@ -75,7 +98,7 @@ client.once('ready', async () => {
     process.exit(1);
   }
 
-  // 註冊 Slash 指令（公會註冊，立即生效）
+  // 註冊 Slash 指令（公會註冊）
   try {
     const guild = await client.guilds.fetch(GUILD_ID);
     const commandsData = client.commands.map(c => c.data.toJSON());
@@ -94,9 +117,14 @@ client.once('ready', async () => {
   // 每日重置（香港時區 00:00）
   cron.schedule('0 0 * * *', async () => {
     try {
-      await User.updateMany({ guildId: GUILD_ID }, { $set: { dailyExpToday: 0, dailyClaimedAt: null, adventureUsedAt: null } });
+      await User.updateMany(
+        { guildId: GUILD_ID },
+        { $set: { dailyExpToday: 0, dailyClaimedAt: null, adventureUsedAt: null } }
+      );
       console.log('每日重置完成');
-    } catch (e) { console.error('每日重置失敗', e); }
+    } catch (e) {
+      console.error('每日重置失敗', e);
+    }
   }, { timezone: 'Asia/Hong_Kong' });
 });
 
@@ -133,9 +161,12 @@ client.on('messageCreate', async (msg) => {
         .setTitle('等級提升！')
         .setDescription(`${msg.author} 升到 **Lv.${user.level}**（當前 EXP：${user.exp}/${expNeededForNextLevel(user.level)}）\n稱號：**${title}**`)
         .setTimestamp();
-      await msg.channel.send({ embeds: [embed] }).catch(()=>{});
+
+      await msg.channel.send({ embeds: [embed] }).catch(() => {});
     }
-  } catch (e) { console.error('messageCreate error', e); }
+  } catch (e) {
+    console.error('messageCreate error', e);
+  }
 });
 
 // 語音：進出房 → 結算
@@ -165,7 +196,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       if (!ch || ch.type !== ChannelType.GuildVoice) return;
 
       const humanCount = ch.members.filter(m => !m.user.bot).size;
-      if (humanCount < 1) return; // 需至少 1 名真人
+      if (humanCount < 1) return; // 至少 1 名真人
 
       // 取目前狀態
       const s = guild.members.cache.get(member.id)?.voice;
@@ -202,7 +233,9 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       user.voiceSession = { joinedAt: null, channelId: null };
       await user.save();
     }
-  } catch (e) { console.error('voiceStateUpdate error', e); }
+  } catch (e) {
+    console.error('voiceStateUpdate error', e);
+  }
 });
 
 // 互動（Slash 指令）
@@ -211,37 +244,25 @@ client.on('interactionCreate', async (interaction) => {
   const command = client.commands.get(interaction.commandName);
   if (!command) return;
   try {
-    await command.execute({ client, interaction, models: { User, GuildConfig }, utils: {
-      addExpWithDailyCap, expNeededForNextLevel, drawFromLootTable, LOGIN_LOOT_TABLE, CLASS_LINES, getTitleForLevel,
-      onLevelMilestoneUpdateRoles, sendToAnnounce
-    }});
+    await command.execute({
+      client,
+      interaction,
+      models: { User, GuildConfig },
+      utils: {
+        addExpWithDailyCap, expNeededForNextLevel, drawFromLootTable,
+        LOGIN_LOOT_TABLE, CLASS_LINES, getTitleForLevel,
+        onLevelMilestoneUpdateRoles, sendToAnnounce
+      }
+    });
   } catch (e) {
     console.error(e);
     if (interaction.replied || interaction.deferred) {
-      await interaction.followUp({ content: '執行指令時發生錯誤。', ephemeral: true }).catch(()=>{});
+      await interaction.followUp({ content: '執行指令時發生錯誤。', ephemeral: true }).catch(() => {});
     } else {
-      await interaction.reply({ content: '執行指令時發生錯誤。', ephemeral: true }).catch(()=>{});
+      await interaction.reply({ content: '執行指令時發生錯誤。', ephemeral: true }).catch(() => {});
     }
   }
 });
 
 client.login(process.env.DISCORD_TOKEN);
-
-// 引入 Express
-const express = require("express");
-const app = express();
-
-// Render 會提供 PORT 環境變數，預設用 3000
-const PORT = process.env.PORT || 3000;
-
-// 建立一個簡單的路由，顯示 Bot 狀態
-app.get("/", (req, res) => {
-  res.send("Discord Bot is running");
-});
-
-
-
-// 啟動伺服器
-app.listen(PORT, () => {
-  console.log(`HTTP server listening on port ${PORT}`);
-});
+``
