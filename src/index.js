@@ -165,7 +165,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       if (!ch || ch.type !== ChannelType.GuildVoice) return;
 
       const humanCount = ch.members.filter(m => !m.user.bot).size;
-      if (humanCount < 2) return; // 需至少 2 名真人
+      if (humanCount < 1) return; // 需至少 1 名真人
 
       // 取目前狀態
       const s = guild.members.cache.get(member.id)?.voice;
