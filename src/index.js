@@ -264,5 +264,20 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
+// =======================
+// Debug & ENV CHECK
+// （一定要在 client.login 之前）
+// =======================
+console.log('ENV CHECK', {
+  token: process.env.DISCORD_TOKEN ? 'SET' : 'MISSING',
+  tokenLen: process.env.DISCORD_TOKEN?.length,
+  guild: process.env.GUILD_ID
+});
+
+client.on('debug', m => console.log('[DJS DEBUG]', m));
+client.on('error', e => console.error('[DJS ERROR]', e));
+
+// =======================
+// Login（一定要最後）
+// =======================
 client.login(process.env.DISCORD_TOKEN);
-``
