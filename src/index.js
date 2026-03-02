@@ -1,5 +1,5 @@
 
-// src/index.js (v4)
+// src/index.js (v5)
 require('dotenv').config();
 
 const express = require('express');
@@ -15,21 +15,32 @@ const {
 const mongoose = require('mongoose');
 const path = require('path');
 const fs = require('fs');
-const dns = require('dns').promises;
+const dns = require('dns');
+const dnsp = require('dns').promises;
 
 /* =========================
  * BOOT BANNER（確認新檔已生效）
  * ========================= */
 console.log('===================================================');
-console.log('=  ETERNAL-TREE BOT :: INDEX v4 (DNS+TIMEOUT PF)  =');
-console.log('=  If you do NOT see this line, code not updated  =');
+console.log('=  ETERNAL-TREE BOT :: INDEX v5 (IPv4 + Timeout PF) =');
+console.log('=  If you do NOT see this line, code not updated   =');
 console.log('===================================================');
+
+/* 強制 DNS 以 IPv4 優先，避免節點 IPv6 路徑不通造成卡住 */
+if (typeof dns.setDefaultResultOrder === 'function') {
+  try {
+    dns.setDefaultResultOrder('ipv4first');
+    console.log('[NET] DNS result order set to ipv4first');
+  } catch (e) {
+    console.warn('[NET] setDefaultResultOrder not applied:', e?.message || e);
+  }
+}
 
 /* =========================
  * ENV
  * ========================= */
 const RAW_TOKEN = process.env.DISCORD_TOKEN || '';
-const DISCORD_TOKEN = RAW_TOKEN.trim(); // 去除隱藏空白
+const DISCORD_TOKEN = RAW_TOKEN.trim();
 const GUILD_ID = process.env.GUILD_ID;
 const MONGODB_URI = process.env.MONGODB_URI;
 const PORT = process.env.PORT || 10000;
@@ -138,7 +149,7 @@ client.once('ready', async () => {
     }
   }
 
-  // Presence（讓成員列表看到「線上」）
+  // Presence（顯示線上狀態）
   try {
     await client.user.setPresence({
       activities: [{ name: '/profile /adventure', type: 0 }],
@@ -202,16 +213,16 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
 (async () => {
   console.log('[PREFLIGHT] Start');
 
-  // 0) DNS 先做，避免 REST 卡住看不到原因
+  // 0) DNS 檢查（IPv4 優先）
   try {
-    const a = await dns.lookup('discord.com');
-    const b = await dns.lookup('gateway.discord.gg');
+    const a = await dnsp.lookup('discord.com');
+    const b = await dnsp.lookup('gateway.discord.gg');
     console.log('[PREFLIGHT] DNS OK:', { discord: a?.address, gateway: b?.address });
   } catch (e) {
     console.error('[PREFLIGHT] DNS lookup FAILED. Possible egress/DNS issue.', e?.message || e);
   }
 
-  // 1) /oauth2/applications/@me（驗證 Token 是否有效）
+  // 1) 應用資訊（驗證 Token）
   try {
     const r1 = await fetchWithTimeout(
       'https://discord.com/api/v10/oauth2/applications/@me',
@@ -236,7 +247,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
     console.error('[PREFLIGHT] oauth2CurrentApplication TIMEOUT/ERROR:', e?.message || e);
   }
 
-  // 2) /gateway/bot（看配額與可用性）
+  // 2) Gateway Bot
   try {
     const r2 = await fetchWithTimeout(
       'https://discord.com/api/v10/gateway/bot',
@@ -269,7 +280,6 @@ setTimeout(async () => {
   if (!client.isReady?.() && !client.user) {
     console.error('[WATCHDOG] Client is not READY after 15s.');
 
-    // 再跑一次 REST（帶逾時）
     try {
       const r1 = await fetchWithTimeout(
         'https://discord.com/api/v10/oauth2/applications/@me',
@@ -293,8 +303,8 @@ setTimeout(async () => {
     }
 
     try {
-      const a = await dns.lookup('discord.com');
-      const b = await dns.lookup('gateway.discord.gg');
+      const a = await dnsp.lookup('discord.com');
+      const b = await dnsp.lookup('gateway.discord.gg');
       console.log('[WATCHDOG] DNS OK:', { discord: a?.address, gateway: b?.address });
     } catch (e) {
       console.error('[WATCHDOG] DNS lookup FAILED. Possible egress/DNS issue.', e?.message || e);
