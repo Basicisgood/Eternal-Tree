@@ -96,3 +96,28 @@ client.once('ready', async () => {
 client.login(process.env.DISCORD_TOKEN)
   .then(() => console.log('[LOG] Login promise resolved'))
   .catch(err => console.error('[ERROR] Login failed', err));
+
+// 檢查 Gateway 狀態
+client.on('ready', () => {
+  console.log(`[READY] Bot 已登入：${client.user.tag}`);
+});
+
+client.on('shardReady', (id, unavailableGuilds) => {
+  console.log(`[SHARD READY] Shard ${id} 啟動完成，未能載入的公會：`, unavailableGuilds);
+});
+
+client.on('shardDisconnect', (event, id) => {
+  console.error(`[SHARD DISCONNECT] Shard ${id} 斷線`, event);
+});
+
+client.on('shardReconnecting', id => {
+  console.log(`[SHARD RECONNECTING] Shard ${id} 嘗試重新連線`);
+});
+
+client.on('shardResume', (id, replayedEvents) => {
+  console.log(`[SHARD RESUME] Shard ${id} 恢復，重播事件數：${replayedEvents}`);
+});
+
+client.on('rateLimit', info => {
+  console.warn('[RATE LIMIT]', info);
+});
