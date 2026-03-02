@@ -1,5 +1,5 @@
 
-// src/index.js
+// src/index.js (v4)
 require('dotenv').config();
 
 const express = require('express');
@@ -21,7 +21,7 @@ const dns = require('dns').promises;
  * BOOT BANNER（確認新檔已生效）
  * ========================= */
 console.log('===================================================');
-console.log('=  ETERNAL-TREE BOT :: INDEX v3 (with PREFLIGHT)  =');
+console.log('=  ETERNAL-TREE BOT :: INDEX v4 (DNS+TIMEOUT PF)  =');
 console.log('=  If you do NOT see this line, code not updated  =');
 console.log('===================================================');
 
@@ -55,9 +55,9 @@ app.listen(PORT, () => console.log(`[HTTP] listening on :${PORT}`));
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,   // 需在 Dev Portal 勾 SERVER MEMBERS INTENT
+    GatewayIntentBits.GuildMembers,   // Dev Portal 勾 SERVER MEMBERS INTENT
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, // 需在 Dev Portal 勾 MESSAGE CONTENT INTENT
+    GatewayIntentBits.MessageContent, // Dev Portal 勾 MESSAGE CONTENT INTENT
   ],
   partials: [Partials.Channel],
 });
@@ -183,33 +183,26 @@ function loadModels() {
 }
 
 /* =========================
- * ✅ 登入前 REST「預檢」
- *  - 驗證 Token 可用（不外洩 Token）
- *  - 印出可用的邀請連結（bot + applications.commands）
- *  - 測試 Gateway Bot 配額
- *  - DNS 解析檢查
+ * 工具：帶逾時的 fetch（Node 18 有全域 fetch）
+ * ========================= */
+async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    return res;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+/* =========================
+ * ✅ 登入前 REST「預檢」：先 DNS，再 REST
  * ========================= */
 (async () => {
-  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-
   console.log('[PREFLIGHT] Start');
-  try {
-    const app = await rest.get(Routes.oauth2CurrentApplication());
-    console.log('[PREFLIGHT] oauth2CurrentApplication OK:', { id: app.id, name: app.name });
 
-    const perms =
-      PermissionFlagsBits.SendMessages |
-      PermissionFlagsBits.ViewChannel |
-      PermissionFlagsBits.EmbedLinks;
-    const invite = `https://discord.com/api/oauth2/authorize?client_id=${app.id}&permissions=${perms}&scope=bot%20applications.commands`;
-    console.log('[PREFLIGHT] Invite URL (use this to ensure the bot is in your target guild):', invite);
-
-    const gw = await rest.get(Routes.gatewayBot());
-    console.log('[PREFLIGHT] gatewayBot OK. session_start_limit:', gw.session_start_limit);
-  } catch (e) {
-    console.error('[PREFLIGHT] FAILED. Token/permissions/network may be wrong.', e?.status, e?.code, e?.message);
-  }
-
+  // 0) DNS 先做，避免 REST 卡住看不到原因
   try {
     const a = await dns.lookup('discord.com');
     const b = await dns.lookup('gateway.discord.gg');
@@ -218,7 +211,51 @@ function loadModels() {
     console.error('[PREFLIGHT] DNS lookup FAILED. Possible egress/DNS issue.', e?.message || e);
   }
 
+  // 1) /oauth2/applications/@me（驗證 Token 是否有效）
+  try {
+    const r1 = await fetchWithTimeout(
+      'https://discord.com/api/v10/oauth2/applications/@me',
+      { headers: { Authorization: `Bot ${DISCORD_TOKEN}` } },
+      8000
+    );
+    if (!r1.ok) {
+      const body = await r1.text();
+      console.error('[PREFLIGHT] /oauth2/applications/@me FAILED:', r1.status, body);
+    } else {
+      const app = await r1.json();
+      console.log('[PREFLIGHT] oauth2CurrentApplication OK:', { id: app.id, name: app.name });
+
+      const perms =
+        PermissionFlagsBits.SendMessages |
+        PermissionFlagsBits.ViewChannel |
+        PermissionFlagsBits.EmbedLinks;
+      const invite = `https://discord.com/api/oauth2/authorize?client_id=${app.id}&permissions=${perms}&scope=bot%20applications.commands`;
+      console.log('[PREFLIGHT] Invite URL (use this to ensure the bot is in your target guild):', invite);
+    }
+  } catch (e) {
+    console.error('[PREFLIGHT] oauth2CurrentApplication TIMEOUT/ERROR:', e?.message || e);
+  }
+
+  // 2) /gateway/bot（看配額與可用性）
+  try {
+    const r2 = await fetchWithTimeout(
+      'https://discord.com/api/v10/gateway/bot',
+      { headers: { Authorization: `Bot ${DISCORD_TOKEN}` } },
+      8000
+    );
+    if (!r2.ok) {
+      const body = await r2.text();
+      console.error('[PREFLIGHT] /gateway/bot FAILED:', r2.status, body);
+    } else {
+      const gw = await r2.json();
+      console.log('[PREFLIGHT] gatewayBot OK. session_start_limit:', gw.session_start_limit);
+    }
+  } catch (e) {
+    console.error('[PREFLIGHT] gatewayBot TIMEOUT/ERROR:', e?.message || e);
+  }
+
   console.log('[PREFLIGHT] End → calling client.login()');
+
   client
     .login(DISCORD_TOKEN)
     .then(() => console.log('[LOGIN] Login promise resolved'))
@@ -232,20 +269,27 @@ setTimeout(async () => {
   if (!client.isReady?.() && !client.user) {
     console.error('[WATCHDOG] Client is not READY after 15s.');
 
+    // 再跑一次 REST（帶逾時）
     try {
-      const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-      const me = await rest.get(Routes.oauth2CurrentApplication());
-      console.log('[WATCHDOG] REST oauth2CurrentApplication OK. App:', { id: me.id, name: me.name });
+      const r1 = await fetchWithTimeout(
+        'https://discord.com/api/v10/oauth2/applications/@me',
+        { headers: { Authorization: `Bot ${DISCORD_TOKEN}` } },
+        8000
+      );
+      console.log('[WATCHDOG] /oauth2/applications/@me status:', r1.status);
     } catch (e) {
-      console.error('[WATCHDOG] REST oauth2CurrentApplication FAILED.', e?.status, e?.code, e?.message);
+      console.error('[WATCHDOG] oauth2CurrentApplication TIMEOUT/ERROR:', e?.message || e);
     }
 
     try {
-      const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-      const gw = await rest.get(Routes.gatewayBot());
-      console.log('[WATCHDOG] REST gatewayBot OK. session_start_limit:', gw.session_start_limit);
+      const r2 = await fetchWithTimeout(
+        'https://discord.com/api/v10/gateway/bot',
+        { headers: { Authorization: `Bot ${DISCORD_TOKEN}` } },
+        8000
+      );
+      console.log('[WATCHDOG] /gateway/bot status:', r2.status);
     } catch (e) {
-      console.error('[WATCHDOG] REST gatewayBot FAILED.', e?.status, e?.code, e?.message);
+      console.error('[WATCHDOG] gatewayBot TIMEOUT/ERROR:', e?.message || e);
     }
 
     try {
