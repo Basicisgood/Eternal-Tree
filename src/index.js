@@ -121,3 +121,29 @@ client.on('shardResume', (id, replayedEvents) => {
 client.on('rateLimit', info => {
   console.warn('[RATE LIMIT]', info);
 });
+
+require('dotenv').config();
+const { Client, GatewayIntentBits } = require('discord.js');
+
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds]
+});
+
+// Debug log
+console.log('[ENV CHECK]', {
+  token: process.env.DISCORD_TOKEN ? 'SET' : 'MISSING',
+  tokenLen: process.env.DISCORD_TOKEN?.length,
+  guild: process.env.GUILD_ID
+});
+
+client.on('ready', () => {
+  console.log(`[READY] Bot 已登入：${client.user.tag}`);
+});
+
+client.on('error', e => console.error('[CLIENT ERROR]', e));
+client.on('shardError', e => console.error('[SHARD ERROR]', e));
+client.on('disconnect', e => console.error('[DISCONNECT]', e));
+
+client.login(process.env.DISCORD_TOKEN)
+  .then(() => console.log('[LOGIN] Login promise resolved'))
+  .catch(err => console.error('[LOGIN ERROR]', err));
