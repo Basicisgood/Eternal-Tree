@@ -1,3 +1,4 @@
+
 // index.js
 require('dotenv').config();
 
@@ -26,7 +27,7 @@ app.get('/', (req, res) => res.send('Discord Bot is running'));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`[LOG] HTTP server listening on :${PORT}`));
 
-/* -------------------------- Discord Client -------------------------- */
+/* -------------------------- Discord Client (single instance) -------------------------- */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -40,13 +41,15 @@ const client = new Client({
 
 client.commands = new Collection();
 
-// 動態載入指令
+/* -------------------------- Load Commands Dynamically -------------------------- */
 const commandsPath = path.join(__dirname, 'commands');
-const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
-for (const file of commandFiles) {
-  const command = require(path.join(commandsPath, file));
-  if (command.data && command.execute) {
-    client.commands.set(command.data.name, command);
+if (fs.existsSync(commandsPath)) {
+  const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
+  for (const file of commandFiles) {
+    const command = require(path.join(commandsPath, file));
+    if (command.data && command.execute) {
+      client.commands.set(command.data.name, command);
+    }
   }
 }
 
@@ -81,7 +84,7 @@ client.once('ready', async () => {
     process.exit(1);
   }
 
-  // Slash 指令註冊
+  // Slash 指令註冊（Guild）
   try {
     const guild = await client.guilds.fetch(GUILD_ID);
     const commandsData = client.commands.map(c => c.data.toJSON());
@@ -92,58 +95,53 @@ client.once('ready', async () => {
   }
 });
 
+/* -------------------------- Interaction Handler -------------------------- */
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  const command = client.commands.get(interaction.commandName);
+  if (!command) return;
+
+  try {
+    await command.execute({ interaction, client, models: { User, GuildConfig } });
+  } catch (err) {
+    console.error(`[COMMAND ERROR] /${interaction.commandName}`, err);
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.reply({ content: '指令執行時發生錯誤，請稍後再試。', flags: 64 /* Ephemeral */ })
+        .catch(() => {});
+    } else {
+      await interaction.editReply({ content: '指令執行時發生錯誤，請稍後再試。' })
+        .catch(() => {});
+    }
+  }
+});
+
+/* -------------------------- Shard / Rate Limit Events -------------------------- */
+client.on('ready', () => {
+  console.log(`[READY] Bot 已登入：${client.user.tag}`);
+});
+client.on('shardReady', (id, unavailableGuilds) => {
+  console.log(`[SHARD READY] Shard ${id} 啟動完成，未能載入的公會：`, unavailableGuilds);
+});
+client.on('shardDisconnect', (event, id) => {
+  console.error(`[SHARD DISCONNECT] Shard ${id} 斷線`, event);
+});
+client.on('shardReconnecting', id => {
+  console.log(`[SHARD RECONNECTING] Shard ${id} 嘗試重新連線`);
+});
+client.on('shardResume', (id, replayedEvents) => {
+  console.log(`[SHARD RESUME] Shard ${id} 恢復，重播事件數：${replayedEvents}`);
+});
+client.on('rateLimit', info => {
+  console.warn('[RATE LIMIT]', info);
+});
+
 /* -------------------------- Login -------------------------- */
 client.login(process.env.DISCORD_TOKEN)
   .then(() => console.log('[LOG] Login promise resolved'))
   .catch(err => console.error('[ERROR] Login failed', err));
 
-// 檢查 Gateway 狀態
-client.on('ready', () => {
-  console.log(`[READY] Bot 已登入：${client.user.tag}`);
-});
-
-client.on('shardReady', (id, unavailableGuilds) => {
-  console.log(`[SHARD READY] Shard ${id} 啟動完成，未能載入的公會：`, unavailableGuilds);
-});
-
-client.on('shardDisconnect', (event, id) => {
-  console.error(`[SHARD DISCONNECT] Shard ${id} 斷線`, event);
-});
-
-client.on('shardReconnecting', id => {
-  console.log(`[SHARD RECONNECTING] Shard ${id} 嘗試重新連線`);
-});
-
-client.on('shardResume', (id, replayedEvents) => {
-  console.log(`[SHARD RESUME] Shard ${id} 恢復，重播事件數：${replayedEvents}`);
-});
-
-client.on('rateLimit', info => {
-  console.warn('[RATE LIMIT]', info);
-});
-
-require('dotenv').config();
-const { Client, GatewayIntentBits } = require('discord.js');
-
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
-});
-
-// Debug log
-console.log('[ENV CHECK]', {
-  token: process.env.DISCORD_TOKEN ? 'SET' : 'MISSING',
-  tokenLen: process.env.DISCORD_TOKEN?.length,
-  guild: process.env.GUILD_ID
-});
-
-client.on('ready', () => {
-  console.log(`[READY] Bot 已登入：${client.user.tag}`);
-});
-
-client.on('error', e => console.error('[CLIENT ERROR]', e));
-client.on('shardError', e => console.error('[SHARD ERROR]', e));
-client.on('disconnect', e => console.error('[DISCONNECT]', e));
-
-client.login(process.env.DISCORD_TOKEN)
-  .then(() => console.log('[LOGIN] Login promise resolved'))
-  .catch(err => console.error('[LOGIN ERROR]', err));
+/* -------------------------- (Optional) CRON Jobs Example -------------------------- */
+// 例：每天 00:05 做一些重置（如有需要再填入內容）
+// cron.schedule('5 0 * * *', async () => {
+//   console.log('[CRON] Daily task running...');
+// });
