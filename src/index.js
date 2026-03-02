@@ -10,6 +10,7 @@ const {
   Collection,
   REST,
   Routes,
+  PermissionFlagsBits,
 } = require('discord.js');
 const mongoose = require('mongoose');
 const path = require('path');
@@ -20,7 +21,7 @@ const dns = require('dns').promises;
  * ENV
  * ========================= */
 const RAW_TOKEN = process.env.DISCORD_TOKEN || '';
-const DISCORD_TOKEN = RAW_TOKEN.trim(); // 修剪空白，避免隱形字元導致登入異常
+const DISCORD_TOKEN = RAW_TOKEN.trim(); // 修剪空白，避免隱形字元害登入
 const GUILD_ID = process.env.GUILD_ID;
 const MONGODB_URI = process.env.MONGODB_URI;
 const PORT = process.env.PORT || 10000;
@@ -46,9 +47,9 @@ app.listen(PORT, () => console.log(`[HTTP] listening on :${PORT}`));
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,   // 需在 Dev Portal 勾選 SERVER MEMBERS INTENT
+    GatewayIntentBits.GuildMembers,   // 勾選 Dev Portal：SERVER MEMBERS INTENT
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, // 需在 Dev Portal 勾選 MESSAGE CONTENT INTENT
+    GatewayIntentBits.MessageContent, // 勾選 Dev Portal：MESSAGE CONTENT INTENT
   ],
   partials: [Partials.Channel],
 });
@@ -129,7 +130,7 @@ client.once('ready', async () => {
     }
   }
 
-  // Presence（協助你在 Discord 看到「線上」）
+  // Presence（讓你在 Discord 成員列表看到「線上」）
   try {
     await client.user.setPresence({
       activities: [{ name: '/profile /adventure', type: 0 }], // Playing
@@ -174,22 +175,66 @@ function loadModels() {
 }
 
 /* =========================
- * Watchdog：30 秒未 READY → 輸出診斷
+ * ✅ 登入前 REST 預檢（Preflight）
+ *  - 確認 Token 有效（不外洩 Token）
+ *  - 提供可用的邀請連結（bot+applications.commands）
+ *  - 測試 Gateway Bot 配額
+ *  - DNS 解析檢查
+ * ========================= */
+(async () => {
+  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+
+  try {
+    // 1) 取應用資訊（驗證 token）
+    const app = await rest.get(Routes.oauth2CurrentApplication());
+    console.log('[PREFLIGHT] oauth2CurrentApplication OK:', { id: app.id, name: app.name });
+
+    // 2) 組出邀請連結（最低限度：Use Application Commands）
+    const perms =
+      PermissionFlagsBits.SendMessages |
+      PermissionFlagsBits.ViewChannel |
+      PermissionFlagsBits.EmbedLinks;
+    const invite = `https://discord.com/api/oauth2/authorize?client_id=${app.id}&permissions=${perms}&scope=bot%20applications.commands`;
+    console.log('[PREFLIGHT] Invite URL (ensure the bot is in your target guild):', invite);
+
+    // 3) 取 Gateway Bot（檢查配額/通道）
+    const gw = await rest.get(Routes.gatewayBot());
+    console.log('[PREFLIGHT] gatewayBot OK. session_start_limit:', gw.session_start_limit);
+  } catch (e) {
+    console.error('[PREFLIGHT] FAILED. Token/permissions/network may be wrong.', e?.status, e?.code, e?.message);
+  }
+
+  // 4) DNS 檢查
+  try {
+    const a = await dns.lookup('discord.com');
+    const b = await dns.lookup('gateway.discord.gg');
+    console.log('[PREFLIGHT] DNS OK:', { discord: a?.address, gateway: b?.address });
+  } catch (e) {
+    console.error('[PREFLIGHT] DNS lookup FAILED. Possible egress/DNS issue.', e?.message || e);
+  }
+
+  // 5) 一切 OK → 登入 Gateway
+  client
+    .login(DISCORD_TOKEN)
+    .then(() => console.log('[LOGIN] Login promise resolved'))
+    .catch((err) => console.error('[LOGIN] failed:', err?.message || err));
+})();
+
+/* =========================
+ * Watchdog：15 秒未 READY → 輸出診斷
  * ========================= */
 setTimeout(async () => {
   if (!client.isReady?.() && !client.user) {
-    console.error('[WATCHDOG] Client is not READY after 30s.');
+    console.error('[WATCHDOG] Client is not READY after 15s.');
 
-    // 1) REST：檢查應用是否可取（驗證 Token 可用）
     try {
       const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
       const me = await rest.get(Routes.oauth2CurrentApplication());
       console.log('[WATCHDOG] REST oauth2CurrentApplication OK. App:', { id: me.id, name: me.name });
     } catch (e) {
-      console.error('[WATCHDOG] REST oauth2CurrentApplication FAILED. Token/permissions suspect.', e?.status, e?.code, e?.message);
+      console.error('[WATCHDOG] REST oauth2CurrentApplication FAILED.', e?.status, e?.code, e?.message);
     }
 
-    // 2) REST：Gateway Bot（需要 Bot Token）
     try {
       const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
       const gw = await rest.get(Routes.gatewayBot());
@@ -198,7 +243,6 @@ setTimeout(async () => {
       console.error('[WATCHDOG] REST gatewayBot FAILED.', e?.status, e?.code, e?.message);
     }
 
-    // 3) DNS 測試：確認機器能解析 Discord 網域
     try {
       const a = await dns.lookup('discord.com');
       const b = await dns.lookup('gateway.discord.gg');
@@ -210,17 +254,9 @@ setTimeout(async () => {
     console.error('[WATCHDOG] Hints:');
     console.error('- 檢查 Dev Portal 是否勾選 Privileged Intents（SERVER MEMBERS、MESSAGE CONTENT）。');
     console.error('- 確認 Bot 已加入 GUILD_ID 指定的伺服器，且 GUILD_ID 正確。');
-    console.error('- 若仍卡住，請回貼 [WATCHDOG] 的完整輸出，我來進一步判斷。');
+    console.error('- 若仍卡住，請把整段 [PREFLIGHT]/[LOGIN]/[READY]/[WATCHDOG] 的輸出貼上來，我來進一步判斷。');
   }
-}, 30_000);
-
-/* =========================
- * Login
- * ========================= */
-client
-  .login(DISCORD_TOKEN)
-  .then(() => console.log('[LOGIN] Login promise resolved'))
-  .catch((err) => console.error('[LOGIN] failed:', err?.message || err));
+}, 15_000);
 
 /* =========================
  * 全域例外（避免進程直接退出）
