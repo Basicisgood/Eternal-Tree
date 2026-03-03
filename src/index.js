@@ -1,4 +1,5 @@
-// src/index.js (v6.1 - Commands recursive load + tolerant module shapes)
+
+// src/index.js (v6.2 - +Message/Voice EXP award)
 require('dotenv').config();
 
 const express = require('express');
@@ -19,7 +20,7 @@ const dnsp = require('dns').promises;
  * BOOT BANNER
  * ========================= */
 console.log('===================================================');
-console.log('=  ETERNAL-TREE BOT :: INDEX v6.1 (RecLoad+Tolerant)');
+console.log('=  ETERNAL-TREE BOT :: INDEX v6.2 (RecLoad+EXP)    =');
 console.log('=  If you do NOT see this line, code not updated   =');
 console.log('===================================================');
 
@@ -72,6 +73,7 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,   // 需在 Dev Portal 勾 SERVER MEMBERS
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent, // 需在 Dev Portal 勾 MESSAGE CONTENT
+    GatewayIntentBits.GuildVoiceStates, // ← 語音 EXP 需要
   ],
   partials: [Partials.Channel, Partials.Message, Partials.GuildMember],
 });
@@ -80,10 +82,6 @@ client.commands = new Collection();
 
 /* =========================
  * 動態載入指令（✅遞迴 + ✅多種匯出型態容錯 + ✅詳盡日誌）
- * 支援：
- *  - CJS：module.exports = { data, execute }
- *  - CJS：module.exports = { data, run }
- *  - ESM：export default { data, execute }（以 .default 存在判斷）
  * ========================= */
 const commandsDir = path.join(__dirname, 'commands');
 
@@ -170,8 +168,19 @@ client.on('shardDisconnect', (event, id) => console.log(`[SHARD DISCONNECT] ${id
 client.on('rateLimit', (info) => console.warn('[RATE LIMIT]', info));
 
 /* =========================
+ * EXP 工具
+ * ========================= */
+const {
+  addExpWithDailyCap,
+  canGainMsgExp,
+  shouldGrantVoiceExp,
+} = require('./utils/exp');
+
+/* =========================
  * Ready
  * ========================= */
+let voiceTicker = null;
+
 client.once('ready', async () => {
   console.log(`[READY] Logged in as ${client.user.tag}`);
   console.log('[READY] Intents:', client.options.intents?.toArray?.() ?? 'n/a');
@@ -225,6 +234,47 @@ client.once('ready', async () => {
   } catch (e) {
     console.error('[READY] Presence failed:', e?.message || e);
   }
+
+  // ---- 語音 EXP Ticker（每 60 秒掃描一次）----
+  if (!voiceTicker) {
+    voiceTicker = setInterval(async () => {
+      try {
+        const { User, GuildConfig } = loadModels();
+        for (const [guildId, guild] of client.guilds.cache) {
+          const cfg = await GuildConfig.findOne({ guildId }).lean().catch(() => null);
+          if (!cfg) continue;
+
+          for (const [, vc] of guild.channels.cache.filter(ch => ch.isVoiceBased())) {
+            for (const [, member] of vc.members) {
+              if (!member || member.user?.bot) continue;
+
+              const user = await safeFindOrCreateUser(User, guildId, member.id);
+              const now = Date.now();
+
+              // 初始化 lastVoiceExpAt（避免重啟後失去基準）
+              if (!user.lastVoiceExpAt) {
+                user.lastVoiceExpAt = new Date(now);
+                await user.save().catch(() => {});
+                continue;
+              }
+
+              if (shouldGrantVoiceExp(user, now)) {
+                const { gained } = await addExpWithDailyCap(user, cfg, 50);
+                if (gained > 0) {
+                  user.lastVoiceExpAt = new Date(now);
+                  await user.save().catch(() => {});
+                  await announceVoiceGain(guild, cfg, member, vc, gained);
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[VOICE TICKER] Error:', e?.message || e);
+      }
+    }, 60_000);
+    console.log('[READY] Voice EXP ticker started (60s).');
+  }
 });
 
 /* =========================
@@ -257,12 +307,131 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 /* =========================
+ * Message EXP（≥5字、每人每 1 分鐘一次 → +20 EXP）
+ * ========================= */
+client.on('messageCreate', async (msg) => {
+  try {
+    if (!msg.guild || msg.author.bot) return;
+    if (!msg.content || msg.content.trim().length < 5) return;
+
+    const { User, GuildConfig } = loadModels();
+    const guildId = msg.guild.id;
+    const userId = msg.author.id;
+
+    const cfg = await GuildConfig.findOne({ guildId }).lean().catch(() => null);
+    if (!cfg) return;
+
+    const user = await safeFindOrCreateUser(User, guildId, userId);
+    const now = Date.now();
+    if (!canGainMsgExp(user, now)) return;
+
+    const { gained } = await addExpWithDailyCap(user, cfg, 20);
+    if (gained > 0) {
+      user.lastMsgExpAt = new Date(now);
+      await user.save().catch(() => {});
+    }
+  } catch (e) {
+    console.error('[MSG EXP] Error:', e?.message || e);
+  }
+});
+
+/* =========================
+ * Voice EXP：狀態變化（加入語音時初始化計時點）
+ * ========================= */
+client.on('voiceStateUpdate', async (oldState, newState) => {
+  try {
+    const member = newState.member || oldState.member;
+    if (!member || member.user?.bot) return;
+
+    const joined = !oldState.channelId && !!newState.channelId;
+    const moved  = !!oldState.channelId && !!newState.channelId && oldState.channelId !== newState.channelId;
+
+    if (joined || moved) {
+      const { User } = loadModels();
+      const user = await safeFindOrCreateUser(User, member.guild.id, member.id);
+      user.lastVoiceExpAt = new Date(); // 從現在開始計
+      await user.save().catch(() => {});
+    }
+  } catch (e) {
+    console.error('[VOICE STATE] Error:', e?.message || e);
+  }
+});
+
+/* =========================
  * Models Loader
  * ========================= */
 function loadModels() {
   const { User } = require('./models/user');
   const { GuildConfig } = require('./models/config');
   return { User, GuildConfig };
+}
+
+/* =========================
+ * 工具：User 取得/建立 + 公告 + 找頻道
+ * ========================= */
+async function safeFindOrCreateUser(User, guildId, userId) {
+  let user = await User.findOne({ guildId, userId: String(userId) }).catch(() => null);
+  if (!user) {
+    // 嘗試以 Number 舊資料查找 → 轉回字串
+    const uidNum = Number(userId);
+    if (Number.isFinite(uidNum)) {
+      user = await User.findOne({ guildId, userId: uidNum }).catch(() => null);
+      if (user) {
+        user.userId = String(userId);
+        await user.save().catch(() => {});
+      }
+    }
+  }
+  if (!user) {
+    user = await User.create({
+      guildId,
+      userId: String(userId),
+      level: 1,
+      exp: 0,
+      dailyExpToday: 0,
+      totalExp: 0,
+      inventory: [],
+    }).catch(() => null);
+  }
+  if (user && !Array.isArray(user.inventory)) user.inventory = [];
+  return user;
+}
+
+async function announceVoiceGain(guild, cfg, member, voiceChannel, gained) {
+  try {
+    const ch = await resolveMissionHallChannel(guild, cfg);
+    if (!ch) return;
+    const emojis = ['🎉', '🔥', '✨', '💥', '🏅'];
+    const em = emojis[Math.floor(Math.random() * emojis.length)];
+    await ch.send({
+      content: `${member} 在語音頻道 **${voiceChannel.name}** 逗留了30分鐘，獲得了 **${gained}EXP**，是個狠角色！ ${em}`,
+    });
+  } catch (e) {
+    console.warn('[ANNOUNCE] Failed to announce voice gain:', e?.message || e);
+  }
+}
+
+async function resolveMissionHallChannel(guild, cfg) {
+  // 1) 優先找名稱為「任務大廳」的文字頻道
+  const byName =
+    guild.channels.cache.find(
+      (c) => c.isTextBased?.() && (c.name === '任務大廳' || c.name === 'mission-hall')
+    ) || null;
+  if (byName) return byName;
+
+  // 2) 退回 GuildConfig 的 announceChannelId
+  const announceId = cfg?.announceChannelId;
+  if (announceId) {
+    const ch = await guild.channels.fetch(announceId).catch(() => null);
+    if (ch && ch.isTextBased?.()) return ch;
+  }
+
+  // 3) 再退回系統頻道
+  if (guild.systemChannelId) {
+    const sys = await guild.channels.fetch(guild.systemChannelId).catch(() => null);
+    if (sys && sys.isTextBased?.()) return sys;
+  }
+  return null;
 }
 
 /* =========================
@@ -327,7 +496,10 @@ async function safeFetchJSON(url, token, timeoutMs = 8000) {
     const app = await safeFetchJSON('https://discord.com/api/v10/oauth2/applications/@me', DISCORD_TOKEN);
     if (app?.id) {
       console.log('[PREFLIGHT] oauth2CurrentApplication OK:', { id: app.id, name: app.name });
-      const perms = PermissionFlagsBits.SendMessages | PermissionFlagsBits.ViewChannel | PermissionFlagsBits.EmbedLinks;
+      const perms =
+        PermissionFlagsBits.SendMessages |
+        PermissionFlagsBits.ViewChannel |
+        PermissionFlagsBits.EmbedLinks;
       const invite = `https://discord.com/api/oauth2/authorize?client_id=${app.id}&permissions=${perms}&scope=bot%20applications.commands`;
       console.log('[PREFLIGHT] Invite URL:', invite);
     }
@@ -378,6 +550,10 @@ setTimeout(() => {
 function gracefulShutdown(signal) {
   console.log(`[SHUTDOWN] Received ${signal}, destroying client...`);
   try { client?.destroy?.(); } catch {}
+  if (voiceTicker) {
+    clearInterval(voiceTicker);
+    voiceTicker = null;
+  }
   setTimeout(() => process.exit(0), 1500);
 }
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
@@ -392,4 +568,3 @@ process.on('unhandledRejection', (reason) => {
 process.on('uncaughtException', (err) => {
   console.error('[UNCAUGHT EXCEPTION]', err);
 });
-``
