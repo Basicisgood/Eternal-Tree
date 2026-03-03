@@ -1,5 +1,4 @@
-
-// src/index.js (v6 - Stable Startup: RL-safe PREFLIGHT, Mongo retry, Slash controlled, 120s Watchdog)
+// src/index.js (v6.1 - Commands recursive load + tolerant module shapes)
 require('dotenv').config();
 
 const express = require('express');
@@ -20,12 +19,12 @@ const dnsp = require('dns').promises;
  * BOOT BANNER
  * ========================= */
 console.log('===================================================');
-console.log('=  ETERNAL-TREE BOT :: INDEX v6 (Stable Startup)   =');
+console.log('=  ETERNAL-TREE BOT :: INDEX v6.1 (RecLoad+Tolerant)');
 console.log('=  If you do NOT see this line, code not updated   =');
 console.log('===================================================');
 
 /* =========================
- * NET: IPv4 優先（避免 IPv6 路徑不通）
+ * NET: IPv4 優先
  * ========================= */
 if (typeof dns.setDefaultResultOrder === 'function') {
   try {
@@ -44,8 +43,8 @@ const DISCORD_TOKEN = RAW_TOKEN.trim();
 const GUILD_ID = process.env.GUILD_ID || '';
 const MONGODB_URI = process.env.MONGODB_URI || '';
 const PORT = process.env.PORT || 10000;
-const STARTUP_PREFLIGHT = process.env.STARTUP_PREFLIGHT !== '0'; // 預設啟動時進行 REST 預檢
-const REGISTER_COMMANDS = process.env.REGISTER_COMMANDS === '1'; // 預設不註冊，部署/調整時手動開
+const STARTUP_PREFLIGHT = process.env.STARTUP_PREFLIGHT !== '0';
+const REGISTER_COMMANDS = process.env.REGISTER_COMMANDS === '1';
 
 console.log('[ENV CHECK]', {
   token: DISCORD_TOKEN ? 'SET' : 'MISSING',
@@ -80,19 +79,76 @@ const client = new Client({
 client.commands = new Collection();
 
 /* =========================
- * 動態載入指令
+ * 動態載入指令（✅遞迴 + ✅多種匯出型態容錯 + ✅詳盡日誌）
+ * 支援：
+ *  - CJS：module.exports = { data, execute }
+ *  - CJS：module.exports = { data, run }
+ *  - ESM：export default { data, execute }（以 .default 存在判斷）
  * ========================= */
-const commandsPath = path.join(__dirname, 'commands');
-if (fs.existsSync(commandsPath)) {
-  const files = fs.readdirSync(commandsPath).filter((f) => f.endsWith('.js'));
-  for (const file of files) {
-    const mod = require(path.join(commandsPath, file));
-    if (mod?.data && mod?.execute) client.commands.set(mod.data.name, mod);
+const commandsDir = path.join(__dirname, 'commands');
+
+function walk(dir) {
+  const list = [];
+  if (!fs.existsSync(dir)) return list;
+  for (const dirent of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, dirent.name);
+    if (dirent.isDirectory()) list.push(...walk(full));
+    else if (dirent.isFile() && dirent.name.endsWith('.js')) list.push(full);
   }
-  console.log(`[BOOT] Loaded ${client.commands.size} command modules.`);
-} else {
-  console.log('[BOOT] No commands directory found.');
+  return list;
 }
+
+(function loadCommands() {
+  const files = walk(commandsDir);
+  const loaded = [];
+  const skipped = [];
+  const nameSeen = new Map();
+
+  for (const file of files) {
+    let mod;
+    try {
+      mod = require(file);
+      // ESM default 兼容
+      if (mod && mod.default) mod = mod.default;
+    } catch (e) {
+      skipped.push({ file, reason: `require failed: ${e?.message || e}` });
+      continue;
+    }
+
+    const data = mod?.data;
+    const handler = mod?.execute || mod?.run;
+
+    if (!data || typeof data?.name !== 'string') {
+      skipped.push({ file, reason: 'missing data or data.name' });
+      continue;
+    }
+    if (typeof handler !== 'function') {
+      skipped.push({ file, reason: 'missing execute/run function' });
+      continue;
+    }
+
+    // 重名偵測
+    if (nameSeen.has(data.name)) {
+      console.warn(`[COMMAND WARNING] duplicate name "${data.name}" at:\n  - ${nameSeen.get(data.name)}\n  - ${file}\n  (Later one overwrites earlier)`);
+    }
+    nameSeen.set(data.name, file);
+
+    client.commands.set(data.name, { data, execute: handler });
+    loaded.push({ name: data.name, file });
+  }
+
+  console.log(`[BOOT] Commands scanned: ${files.length}`);
+  console.log(`[BOOT] Commands loaded : ${loaded.length}`);
+  if (loaded.length) {
+    for (const { name, file } of loaded) {
+      console.log(`  - ${name.padEnd(18)} ← ${path.relative(process.cwd(), file)}`);
+    }
+  }
+  if (skipped.length) {
+    console.log(`[BOOT] Commands skipped: ${skipped.length}`);
+    for (const s of skipped) console.log(`  - ${path.relative(process.cwd(), s.file)} → ${s.reason}`);
+  }
+})();
 
 /* =========================
  * 安全 Debug（避免外洩 Token）
@@ -159,7 +215,7 @@ client.once('ready', async () => {
     console.log('[SLASH] Skipped registering (REGISTER_COMMANDS != 1).');
   }
 
-  // ---- Presence（顯示線上狀態）----
+  // ---- Presence ----
   try {
     await client.user.setPresence({
       activities: [{ name: '/profile /adventure', type: 0 }],
@@ -176,8 +232,15 @@ client.once('ready', async () => {
  * ========================= */
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand?.()) return;
+
   const cmd = client.commands.get(interaction.commandName);
-  if (!cmd) return;
+  if (!cmd) {
+    console.warn(`[INTERACTION] Command not found: /${interaction.commandName}`);
+    try {
+      return await interaction.reply({ content: '這個指令目前不可用或尚未載入。', ephemeral: true });
+    } catch {}
+    return;
+  }
 
   try {
     await cmd.execute({ interaction, client, models: loadModels() });
@@ -189,12 +252,12 @@ client.on('interactionCreate', async (interaction) => {
       } else {
         await interaction.editReply({ content: '執行指令時發生錯誤，請稍後再試。' });
       }
-    } catch (_) {}
+    } catch {}
   }
 });
 
 /* =========================
- * Models Loader（集中引入，避免循環引用）
+ * Models Loader
  * ========================= */
 function loadModels() {
   const { User } = require('./models/user');
@@ -203,11 +266,9 @@ function loadModels() {
 }
 
 /* =========================
- * 工具：sleep 與帶逾時的 fetch（Node 18 有全域 fetch）
+ * 工具：sleep + fetchWithTimeout
  * ========================= */
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   const controller = new AbortController();
@@ -232,7 +293,7 @@ async function safeFetchJSON(url, token, timeoutMs = 8000) {
       const wait = ra ? Math.ceil(parseFloat(ra) * 1000) : 5000;
       console.warn(`[RL] ${url} 429; wait ${wait}ms`);
       await sleep(wait);
-      return null; // 呼叫端視情況是否再試
+      return null;
     }
 
     if (!res.ok) {
@@ -249,9 +310,6 @@ async function safeFetchJSON(url, token, timeoutMs = 8000) {
 
 /* =========================
  * ✅ 登入前 PREFLIGHT（可關）
- *  - DNS 檢查
- *  - /oauth2/applications/@me（驗證 Token）
- *  - /gateway/bot（觀察 Identify 配額）
  * ========================= */
 (async () => {
   console.log('[PREFLIGHT] Start');
@@ -266,19 +324,14 @@ async function safeFetchJSON(url, token, timeoutMs = 8000) {
   }
 
   if (STARTUP_PREFLIGHT) {
-    // 1) 應用資訊（驗證 Token）
     const app = await safeFetchJSON('https://discord.com/api/v10/oauth2/applications/@me', DISCORD_TOKEN);
     if (app?.id) {
       console.log('[PREFLIGHT] oauth2CurrentApplication OK:', { id: app.id, name: app.name });
-      const perms =
-        PermissionFlagsBits.SendMessages |
-        PermissionFlagsBits.ViewChannel |
-        PermissionFlagsBits.EmbedLinks;
+      const perms = PermissionFlagsBits.SendMessages | PermissionFlagsBits.ViewChannel | PermissionFlagsBits.EmbedLinks;
       const invite = `https://discord.com/api/oauth2/authorize?client_id=${app.id}&permissions=${perms}&scope=bot%20applications.commands`;
       console.log('[PREFLIGHT] Invite URL:', invite);
     }
 
-    // 2) Gateway Bot（觀察 Identify 配額）
     const gw = await safeFetchJSON('https://discord.com/api/v10/gateway/bot', DISCORD_TOKEN);
     if (gw?.session_start_limit) {
       console.log('[PREFLIGHT] gatewayBot OK. session_start_limit:', gw.session_start_limit);
@@ -320,20 +373,18 @@ setTimeout(() => {
 }, 120_000);
 
 /* =========================
- * 優雅關閉（避免平台殺進程造成無限重啟風暴）
+ * 優雅關閉
  * ========================= */
 function gracefulShutdown(signal) {
   console.log(`[SHUTDOWN] Received ${signal}, destroying client...`);
-  try {
-    client?.destroy?.();
-  } catch {}
+  try { client?.destroy?.(); } catch {}
   setTimeout(() => process.exit(0), 1500);
 }
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 /* =========================
- * 全域例外（避免進程直接退出）
+ * 全域例外
  * ========================= */
 process.on('unhandledRejection', (reason) => {
   console.error('[UNHANDLED REJECTION]', reason);
@@ -341,3 +392,4 @@ process.on('unhandledRejection', (reason) => {
 process.on('uncaughtException', (err) => {
   console.error('[UNCAUGHT EXCEPTION]', err);
 });
+``
