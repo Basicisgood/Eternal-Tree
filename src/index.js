@@ -1,5 +1,5 @@
 
-// src/index.js (v6.2 - +Message/Voice EXP award)
+// src/index.js (v6.3 - RecLoad + Message/Voice EXP aligned to schema)
 require('dotenv').config();
 
 const express = require('express');
@@ -20,7 +20,7 @@ const dnsp = require('dns').promises;
  * BOOT BANNER
  * ========================= */
 console.log('===================================================');
-console.log('=  ETERNAL-TREE BOT :: INDEX v6.2 (RecLoad+EXP)    =');
+console.log('=  ETERNAL-TREE BOT :: INDEX v6.3 (RecLoad+EXP)    =');
 console.log('=  If you do NOT see this line, code not updated   =');
 console.log('===================================================');
 
@@ -73,7 +73,7 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,   // 需在 Dev Portal 勾 SERVER MEMBERS
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent, // 需在 Dev Portal 勾 MESSAGE CONTENT
-    GatewayIntentBits.GuildVoiceStates, // ← 語音 EXP 需要
+    GatewayIntentBits.GuildVoiceStates, // 語音 EXP 需要
   ],
   partials: [Partials.Channel, Partials.Message, Partials.GuildMember],
 });
@@ -81,7 +81,7 @@ const client = new Client({
 client.commands = new Collection();
 
 /* =========================
- * 動態載入指令（✅遞迴 + ✅多種匯出型態容錯 + ✅詳盡日誌）
+ * 動態載入指令（遞迴 + 多種匯出型態容錯 + 詳盡日誌）
  * ========================= */
 const commandsDir = path.join(__dirname, 'commands');
 
@@ -106,8 +106,7 @@ function walk(dir) {
     let mod;
     try {
       mod = require(file);
-      // ESM default 兼容
-      if (mod && mod.default) mod = mod.default;
+      if (mod && mod.default) mod = mod.default; // ESM default 兼容
     } catch (e) {
       skipped.push({ file, reason: `require failed: ${e?.message || e}` });
       continue;
@@ -115,17 +114,9 @@ function walk(dir) {
 
     const data = mod?.data;
     const handler = mod?.execute || mod?.run;
+    if (!data || typeof data?.name !== 'string') { skipped.push({ file, reason: 'missing data or data.name' }); continue; }
+    if (typeof handler !== 'function') { skipped.push({ file, reason: 'missing execute/run function' }); continue; }
 
-    if (!data || typeof data?.name !== 'string') {
-      skipped.push({ file, reason: 'missing data or data.name' });
-      continue;
-    }
-    if (typeof handler !== 'function') {
-      skipped.push({ file, reason: 'missing execute/run function' });
-      continue;
-    }
-
-    // 重名偵測
     if (nameSeen.has(data.name)) {
       console.warn(`[COMMAND WARNING] duplicate name "${data.name}" at:\n  - ${nameSeen.get(data.name)}\n  - ${file}\n  (Later one overwrites earlier)`);
     }
@@ -137,10 +128,8 @@ function walk(dir) {
 
   console.log(`[BOOT] Commands scanned: ${files.length}`);
   console.log(`[BOOT] Commands loaded : ${loaded.length}`);
-  if (loaded.length) {
-    for (const { name, file } of loaded) {
-      console.log(`  - ${name.padEnd(18)} ← ${path.relative(process.cwd(), file)}`);
-    }
+  if (loaded.length) for (const { name, file } of loaded) {
+    console.log(`  - ${name.padEnd(18)} ← ${path.relative(process.cwd(), file)}`);
   }
   if (skipped.length) {
     console.log(`[BOOT] Commands skipped: ${skipped.length}`);
@@ -168,13 +157,9 @@ client.on('shardDisconnect', (event, id) => console.log(`[SHARD DISCONNECT] ${id
 client.on('rateLimit', (info) => console.warn('[RATE LIMIT]', info));
 
 /* =========================
- * EXP 工具
+ * EXP 工具（只用每日上限與升級規則）
  * ========================= */
-const {
-  addExpWithDailyCap,
-  canGainMsgExp,
-  shouldGrantVoiceExp,
-} = require('./utils/exp');
+const { addExpWithDailyCap } = require('./utils/exp');
 
 /* =========================
  * Ready
@@ -200,7 +185,7 @@ client.once('ready', async () => {
         } catch (e) {
           console.error('[MONGO] Failed to connect, will retry:', e?.message || e);
           await sleep(delay);
-          delay = Math.min(delay * 2, 60000); // 指數退避，上限 60s
+          delay = Math.min(delay * 2, 60000);
         }
       }
     })().catch(() => {});
@@ -213,7 +198,6 @@ client.once('ready', async () => {
     try {
       const g = await client.guilds.fetch(GUILD_ID);
       console.log('[READY] Target guild fetched:', g?.name, g?.id);
-
       const data = client.commands.map((c) => c.data.toJSON());
       await g.commands.set(data);
       console.log(`[SLASH] Registered ${data.length} commands to guild ${g.id}`);
@@ -237,42 +221,9 @@ client.once('ready', async () => {
 
   // ---- 語音 EXP Ticker（每 60 秒掃描一次）----
   if (!voiceTicker) {
-    voiceTicker = setInterval(async () => {
-      try {
-        const { User, GuildConfig } = loadModels();
-        for (const [guildId, guild] of client.guilds.cache) {
-          const cfg = await GuildConfig.findOne({ guildId }).lean().catch(() => null);
-          if (!cfg) continue;
-
-          for (const [, vc] of guild.channels.cache.filter(ch => ch.isVoiceBased())) {
-            for (const [, member] of vc.members) {
-              if (!member || member.user?.bot) continue;
-
-              const user = await safeFindOrCreateUser(User, guildId, member.id);
-              const now = Date.now();
-
-              // 初始化 lastVoiceExpAt（避免重啟後失去基準）
-              if (!user.lastVoiceExpAt) {
-                user.lastVoiceExpAt = new Date(now);
-                await user.save().catch(() => {});
-                continue;
-              }
-
-              if (shouldGrantVoiceExp(user, now)) {
-                const { gained } = await addExpWithDailyCap(user, cfg, 50);
-                if (gained > 0) {
-                  user.lastVoiceExpAt = new Date(now);
-                  await user.save().catch(() => {});
-                  await announceVoiceGain(guild, cfg, member, vc, gained);
-                }
-              }
-            }
-          }
-        }
-      } catch (e) {
-        console.error('[VOICE TICKER] Error:', e?.message || e);
-      }
-    }, 60_000);
+    voiceTicker = setInterval(() => settleVoiceExpAllGuilds().catch(err =>
+      console.error('[VOICE TICKER] Error:', err?.message || err)
+    ), 60_000);
     console.log('[READY] Voice EXP ticker started (60s).');
   }
 });
@@ -286,9 +237,7 @@ client.on('interactionCreate', async (interaction) => {
   const cmd = client.commands.get(interaction.commandName);
   if (!cmd) {
     console.warn(`[INTERACTION] Command not found: /${interaction.commandName}`);
-    try {
-      return await interaction.reply({ content: '這個指令目前不可用或尚未載入。', ephemeral: true });
-    } catch {}
+    try { return await interaction.reply({ content: '這個指令目前不可用或尚未載入。', ephemeral: true }); } catch {}
     return;
   }
 
@@ -307,12 +256,14 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 /* =========================
- * Message EXP（≥5字、每人每 1 分鐘一次 → +20 EXP）
+ * Message EXP（≥5字、每人每 1 分鐘最多一次 → +20 EXP）
+ * 對齊 schema 欄位：lastMessageExpAt
  * ========================= */
 client.on('messageCreate', async (msg) => {
   try {
     if (!msg.guild || msg.author.bot) return;
-    if (!msg.content || msg.content.trim().length < 5) return;
+    const content = (msg.content || '').trim();
+    if (content.length < 5) return;
 
     const { User, GuildConfig } = loadModels();
     const guildId = msg.guild.id;
@@ -323,11 +274,12 @@ client.on('messageCreate', async (msg) => {
 
     const user = await safeFindOrCreateUser(User, guildId, userId);
     const now = Date.now();
-    if (!canGainMsgExp(user, now)) return;
+    const last = user.lastMessageExpAt ? user.lastMessageExpAt.getTime() : 0;
+    if (now - last < 60_000) return; // 1 分鐘冷卻
 
     const { gained } = await addExpWithDailyCap(user, cfg, 20);
     if (gained > 0) {
-      user.lastMsgExpAt = new Date(now);
+      user.lastMessageExpAt = new Date(now);
       await user.save().catch(() => {});
     }
   } catch (e) {
@@ -336,7 +288,8 @@ client.on('messageCreate', async (msg) => {
 });
 
 /* =========================
- * Voice EXP：狀態變化（加入語音時初始化計時點）
+ * Voice EXP：狀態變化（加入/換房/離開 → 初始化或補發）
+ * 對齊 schema 欄位：voiceSession.joinedAt / channelId
  * ========================= */
 client.on('voiceStateUpdate', async (oldState, newState) => {
   try {
@@ -345,17 +298,104 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 
     const joined = !oldState.channelId && !!newState.channelId;
     const moved  = !!oldState.channelId && !!newState.channelId && oldState.channelId !== newState.channelId;
+    const left   = !!oldState.channelId && !newState.channelId;
+
+    const { User, GuildConfig } = loadModels();
+    const guildId = member.guild.id;
+    const cfg = await GuildConfig.findOne({ guildId }).lean().catch(() => null);
+    if (!cfg) return;
+
+    const user = await safeFindOrCreateUser(User, guildId, member.id);
+
+    // 初始化 voiceSession 結構
+    if (!user.voiceSession) user.voiceSession = { joinedAt: null, channelId: null };
+
+    const now = Date.now();
 
     if (joined || moved) {
-      const { User } = loadModels();
-      const user = await safeFindOrCreateUser(User, member.guild.id, member.id);
-      user.lastVoiceExpAt = new Date(); // 從現在開始計
+      user.voiceSession.joinedAt = new Date(now);
+      user.voiceSession.channelId = newState.channelId;
+      await user.save().catch(() => {});
+      return;
+    }
+
+    if (left) {
+      // 補發在語音中的整數 30 分鐘段
+      if (user.voiceSession?.joinedAt) {
+        const elapsedMs = now - new Date(user.voiceSession.joinedAt).getTime();
+        const awards = Math.floor(elapsedMs / (30 * 60 * 1000));
+        if (awards > 0) {
+          const toGive = awards * 50;
+          const { gained } = await addExpWithDailyCap(user, cfg, toGive);
+          if (gained > 0) {
+            await user.save().catch(() => {});
+            // 逐段公告（避免一次大量訊息，可以視需要改為合併訊息）
+            const guild = member.guild;
+            const vcName = oldState.channel?.name || '語音頻道';
+            for (let i = 0; i < awards; i++) {
+              await announceVoiceGain(guild, cfg, member, vcName, 50).catch(() => {});
+            }
+          }
+        }
+      }
+      // 重置 session
+      user.voiceSession.joinedAt = null;
+      user.voiceSession.channelId = null;
       await user.save().catch(() => {});
     }
   } catch (e) {
     console.error('[VOICE STATE] Error:', e?.message || e);
   }
 });
+
+/* =========================
+ * 定時掃描所有公會語音成員（每 60 秒）
+ * 每滿 30 分鐘即時 +50，並將 joinedAt 往後推 30 分鐘，保留餘額
+ * ========================= */
+async function settleVoiceExpAllGuilds() {
+  const { User, GuildConfig } = loadModels();
+
+  for (const [, guild] of client.guilds.cache) {
+    const cfg = await GuildConfig.findOne({ guildId: guild.id }).lean().catch(() => null);
+    if (!cfg) continue;
+
+    for (const [, ch] of guild.channels.cache.filter(c => c.isVoiceBased())) {
+      for (const [, member] of ch.members) {
+        if (!member || member.user?.bot) continue;
+
+        const user = await safeFindOrCreateUser(User, guild.id, member.id);
+        if (!user.voiceSession) user.voiceSession = { joinedAt: null, channelId: null };
+
+        // 若資料缺失或頻道不一致 → 以現在作為新的起點
+        if (!user.voiceSession.joinedAt || user.voiceSession.channelId !== ch.id) {
+          user.voiceSession.joinedAt = new Date();
+          user.voiceSession.channelId = ch.id;
+          await user.save().catch(() => {});
+          continue;
+        }
+
+        const now = Date.now();
+        const joinedAtMs = new Date(user.voiceSession.joinedAt).getTime();
+        const elapsed = now - joinedAtMs;
+        const awards = Math.floor(elapsed / (30 * 60 * 1000));
+
+        if (awards >= 1) {
+          const toGive = awards * 50;
+          const { gained } = await addExpWithDailyCap(user, cfg, toGive);
+          if (gained > 0) {
+            // 將 joinedAt 往後推整數段，保留餘額
+            user.voiceSession.joinedAt = new Date(joinedAtMs + awards * 30 * 60 * 1000);
+            await user.save().catch(() => {});
+            // 逐段公告
+            for (let i = 0; i < awards; i++) {
+              await announceVoiceGain(guild, cfg, member, ch.name, 50).catch(() => {});
+            }
+          }
+        }
+      }
+    }
+  }
+}
 
 /* =========================
  * Models Loader
@@ -372,7 +412,7 @@ function loadModels() {
 async function safeFindOrCreateUser(User, guildId, userId) {
   let user = await User.findOne({ guildId, userId: String(userId) }).catch(() => null);
   if (!user) {
-    // 嘗試以 Number 舊資料查找 → 轉回字串
+    // 若舊資料以 Number 儲存，嘗試補救（再找一次，並轉成字串回存）
     const uidNum = Number(userId);
     if (Number.isFinite(uidNum)) {
       user = await User.findOne({ guildId, userId: uidNum }).catch(() => null);
@@ -388,23 +428,29 @@ async function safeFindOrCreateUser(User, guildId, userId) {
       userId: String(userId),
       level: 1,
       exp: 0,
-      dailyExpToday: 0,
       totalExp: 0,
+      dailyExpToday: 0,
+      lastMessageExpAt: null,
+      dailyClaimedAt: null,
+      adventureUsedAt: null,
+      classLine: null,
       inventory: [],
+      voiceSession: { joinedAt: null, channelId: null },
     }).catch(() => null);
   }
   if (user && !Array.isArray(user.inventory)) user.inventory = [];
+  if (user && !user.voiceSession) user.voiceSession = { joinedAt: null, channelId: null };
   return user;
 }
 
-async function announceVoiceGain(guild, cfg, member, voiceChannel, gained) {
+async function announceVoiceGain(guild, cfg, member, voiceChannelName, gained) {
   try {
     const ch = await resolveMissionHallChannel(guild, cfg);
     if (!ch) return;
     const emojis = ['🎉', '🔥', '✨', '💥', '🏅'];
     const em = emojis[Math.floor(Math.random() * emojis.length)];
     await ch.send({
-      content: `${member} 在語音頻道 **${voiceChannel.name}** 逗留了30分鐘，獲得了 **${gained}EXP**，是個狠角色！ ${em}`,
+      content: `${member} 在語音頻道 **${voiceChannelName}** 逗留了30分鐘，獲得了 **${gained}EXP**，是個狠角色！ ${em}`,
     });
   } catch (e) {
     console.warn('[ANNOUNCE] Failed to announce voice gain:', e?.message || e);
@@ -412,11 +458,10 @@ async function announceVoiceGain(guild, cfg, member, voiceChannel, gained) {
 }
 
 async function resolveMissionHallChannel(guild, cfg) {
-  // 1) 優先找名稱為「任務大廳」的文字頻道
-  const byName =
-    guild.channels.cache.find(
-      (c) => c.isTextBased?.() && (c.name === '任務大廳' || c.name === 'mission-hall')
-    ) || null;
+  // 1) 優先找「任務大廳」或英文別名
+  const byName = guild.channels.cache.find(
+    (c) => c.isTextBased?.() && (c.name === '任務大廳' || c.name === 'mission-hall')
+  ) || null;
   if (byName) return byName;
 
   // 2) 退回 GuildConfig 的 announceChannelId
@@ -550,10 +595,7 @@ setTimeout(() => {
 function gracefulShutdown(signal) {
   console.log(`[SHUTDOWN] Received ${signal}, destroying client...`);
   try { client?.destroy?.(); } catch {}
-  if (voiceTicker) {
-    clearInterval(voiceTicker);
-    voiceTicker = null;
-  }
+  if (voiceTicker) { clearInterval(voiceTicker); voiceTicker = null; }
   setTimeout(() => process.exit(0), 1500);
 }
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
