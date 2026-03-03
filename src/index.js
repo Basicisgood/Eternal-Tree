@@ -1,5 +1,5 @@
 
-// src/index.js (v5)
+// src/index.js (v6 - Stable Startup: RL-safe PREFLIGHT, Mongo retry, Slash controlled, 120s Watchdog)
 require('dotenv').config();
 
 const express = require('express');
@@ -8,8 +8,6 @@ const {
   GatewayIntentBits,
   Partials,
   Collection,
-  REST,
-  Routes,
   PermissionFlagsBits,
 } = require('discord.js');
 const mongoose = require('mongoose');
@@ -19,14 +17,16 @@ const dns = require('dns');
 const dnsp = require('dns').promises;
 
 /* =========================
- * BOOT BANNER（確認新檔已生效）
+ * BOOT BANNER
  * ========================= */
 console.log('===================================================');
-console.log('=  ETERNAL-TREE BOT :: INDEX v5 (IPv4 + Timeout PF) =');
+console.log('=  ETERNAL-TREE BOT :: INDEX v6 (Stable Startup)   =');
 console.log('=  If you do NOT see this line, code not updated   =');
 console.log('===================================================');
 
-/* 強制 DNS 以 IPv4 優先，避免節點 IPv6 路徑不通造成卡住 */
+/* =========================
+ * NET: IPv4 優先（避免 IPv6 路徑不通）
+ * ========================= */
 if (typeof dns.setDefaultResultOrder === 'function') {
   try {
     dns.setDefaultResultOrder('ipv4first');
@@ -41,15 +41,19 @@ if (typeof dns.setDefaultResultOrder === 'function') {
  * ========================= */
 const RAW_TOKEN = process.env.DISCORD_TOKEN || '';
 const DISCORD_TOKEN = RAW_TOKEN.trim();
-const GUILD_ID = process.env.GUILD_ID;
-const MONGODB_URI = process.env.MONGODB_URI;
+const GUILD_ID = process.env.GUILD_ID || '';
+const MONGODB_URI = process.env.MONGODB_URI || '';
 const PORT = process.env.PORT || 10000;
+const STARTUP_PREFLIGHT = process.env.STARTUP_PREFLIGHT !== '0'; // 預設啟動時進行 REST 預檢
+const REGISTER_COMMANDS = process.env.REGISTER_COMMANDS === '1'; // 預設不註冊，部署/調整時手動開
 
 console.log('[ENV CHECK]', {
   token: DISCORD_TOKEN ? 'SET' : 'MISSING',
   tokenLen: DISCORD_TOKEN?.length ?? 0,
-  guild: GUILD_ID,
+  guild: GUILD_ID || '(none)',
   hasMongo: !!MONGODB_URI,
+  STARTUP_PREFLIGHT,
+  REGISTER_COMMANDS,
 });
 
 /* =========================
@@ -66,11 +70,11 @@ app.listen(PORT, () => console.log(`[HTTP] listening on :${PORT}`));
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,   // Dev Portal 勾 SERVER MEMBERS INTENT
+    GatewayIntentBits.GuildMembers,   // 需在 Dev Portal 勾 SERVER MEMBERS
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, // Dev Portal 勾 MESSAGE CONTENT INTENT
+    GatewayIntentBits.MessageContent, // 需在 Dev Portal 勾 MESSAGE CONTENT
   ],
-  partials: [Partials.Channel],
+  partials: [Partials.Channel, Partials.Message, Partials.GuildMember],
 });
 
 client.commands = new Collection();
@@ -117,23 +121,30 @@ client.once('ready', async () => {
   console.log('[READY] Intents:', client.options.intents?.toArray?.() ?? 'n/a');
   console.log('[READY] Guild cache size:', client.guilds.cache.size);
 
-  // 連 MongoDB
+  // ---- MongoDB：背景重試，不要退出進程 ----
   if (!MONGODB_URI) {
-    console.error('[FATAL] MONGODB_URI is missing. Exiting.');
-    process.exit(1);
-  }
-  try {
-    await mongoose.connect(MONGODB_URI);
-    console.log('[MONGO] Connected');
-  } catch (e) {
-    console.error('[MONGO] Failed to connect:', e?.message || e);
-    process.exit(1);
+    console.warn('[MONGO] MONGODB_URI is missing. Bot will run without DB; retry disabled.');
+  } else {
+    (async function connectMongoWithRetry() {
+      let delay = 5000;
+      while (true) {
+        try {
+          await mongoose.connect(MONGODB_URI);
+          console.log('[MONGO] Connected');
+          break;
+        } catch (e) {
+          console.error('[MONGO] Failed to connect, will retry:', e?.message || e);
+          await sleep(delay);
+          delay = Math.min(delay * 2, 60000); // 指數退避，上限 60s
+        }
+      }
+    })().catch(() => {});
   }
 
-  // 取得目標 Guild 並註冊 Slash 指令（Guild scope）
+  // ---- Guild Slash：受環境變數控制，避免每次啟動都覆寫 ----
   if (!GUILD_ID) {
-    console.error('[CONFIG] GUILD_ID is missing. Slash commands will not be registered.');
-  } else {
+    console.warn('[SLASH] Skipped: GUILD_ID is missing.');
+  } else if (REGISTER_COMMANDS) {
     try {
       const g = await client.guilds.fetch(GUILD_ID);
       console.log('[READY] Target guild fetched:', g?.name, g?.id);
@@ -142,14 +153,13 @@ client.once('ready', async () => {
       await g.commands.set(data);
       console.log(`[SLASH] Registered ${data.length} commands to guild ${g.id}`);
     } catch (e) {
-      console.error(
-        '[SLASH] Failed to fetch/register guild commands. Check: bot in guild? GUILD_ID correct? permissions?',
-        e?.message || e
-      );
+      console.error('[SLASH] Register failed. Check bot in guild? GUILD_ID? permissions?', e?.message || e);
     }
+  } else {
+    console.log('[SLASH] Skipped registering (REGISTER_COMMANDS != 1).');
   }
 
-  // Presence（顯示線上狀態）
+  // ---- Presence（顯示線上狀態）----
   try {
     await client.user.setPresence({
       activities: [{ name: '/profile /adventure', type: 0 }],
@@ -165,7 +175,7 @@ client.once('ready', async () => {
  * Interaction Handler
  * ========================= */
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
+  if (!interaction.isChatInputCommand?.()) return;
   const cmd = client.commands.get(interaction.commandName);
   if (!cmd) return;
 
@@ -175,8 +185,7 @@ client.on('interactionCreate', async (interaction) => {
     console.error(`[CMD ERROR] /${interaction.commandName}`, err);
     try {
       if (!interaction.deferred && !interaction.replied) {
-        // 64 = MessageFlags.Ephemeral
-        await interaction.reply({ content: '執行指令時發生錯誤，請稍後再試。', flags: 64 });
+        await interaction.reply({ content: '執行指令時發生錯誤，請稍後再試。', ephemeral: true });
       } else {
         await interaction.editReply({ content: '執行指令時發生錯誤，請稍後再試。' });
       }
@@ -194,8 +203,12 @@ function loadModels() {
 }
 
 /* =========================
- * 工具：帶逾時的 fetch（Node 18 有全域 fetch）
+ * 工具：sleep 與帶逾時的 fetch（Node 18 有全域 fetch）
  * ========================= */
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
@@ -208,12 +221,42 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
 }
 
 /* =========================
- * ✅ 登入前 REST「預檢」：先 DNS，再 REST
+ * 安全 REST 包裝（尊重 Rate Limit）
+ * ========================= */
+async function safeFetchJSON(url, token, timeoutMs = 8000) {
+  try {
+    const res = await fetchWithTimeout(url, { headers: { Authorization: `Bot ${token}` } }, timeoutMs);
+
+    if (res.status === 429) {
+      const ra = res.headers.get('retry-after') || res.headers.get('x-ratelimit-reset-after');
+      const wait = ra ? Math.ceil(parseFloat(ra) * 1000) : 5000;
+      console.warn(`[RL] ${url} 429; wait ${wait}ms`);
+      await sleep(wait);
+      return null; // 呼叫端視情況是否再試
+    }
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.error(`[REST] ${url} FAILED`, res.status, body);
+      return null;
+    }
+    return await res.json();
+  } catch (e) {
+    console.error(`[REST] ${url} ERROR`, e?.message || e);
+    return null;
+  }
+}
+
+/* =========================
+ * ✅ 登入前 PREFLIGHT（可關）
+ *  - DNS 檢查
+ *  - /oauth2/applications/@me（驗證 Token）
+ *  - /gateway/bot（觀察 Identify 配額）
  * ========================= */
 (async () => {
   console.log('[PREFLIGHT] Start');
 
-  // 0) DNS 檢查（IPv4 優先）
+  // 0) DNS
   try {
     const a = await dnsp.lookup('discord.com');
     const b = await dnsp.lookup('gateway.discord.gg');
@@ -222,100 +265,72 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
     console.error('[PREFLIGHT] DNS lookup FAILED. Possible egress/DNS issue.', e?.message || e);
   }
 
-  // 1) 應用資訊（驗證 Token）
-  try {
-    const r1 = await fetchWithTimeout(
-      'https://discord.com/api/v10/oauth2/applications/@me',
-      { headers: { Authorization: `Bot ${DISCORD_TOKEN}` } },
-      8000
-    );
-    if (!r1.ok) {
-      const body = await r1.text();
-      console.error('[PREFLIGHT] /oauth2/applications/@me FAILED:', r1.status, body);
-    } else {
-      const app = await r1.json();
+  if (STARTUP_PREFLIGHT) {
+    // 1) 應用資訊（驗證 Token）
+    const app = await safeFetchJSON('https://discord.com/api/v10/oauth2/applications/@me', DISCORD_TOKEN);
+    if (app?.id) {
       console.log('[PREFLIGHT] oauth2CurrentApplication OK:', { id: app.id, name: app.name });
-
       const perms =
         PermissionFlagsBits.SendMessages |
         PermissionFlagsBits.ViewChannel |
         PermissionFlagsBits.EmbedLinks;
       const invite = `https://discord.com/api/oauth2/authorize?client_id=${app.id}&permissions=${perms}&scope=bot%20applications.commands`;
-      console.log('[PREFLIGHT] Invite URL (use this to ensure the bot is in your target guild):', invite);
+      console.log('[PREFLIGHT] Invite URL:', invite);
     }
-  } catch (e) {
-    console.error('[PREFLIGHT] oauth2CurrentApplication TIMEOUT/ERROR:', e?.message || e);
-  }
 
-  // 2) Gateway Bot
-  try {
-    const r2 = await fetchWithTimeout(
-      'https://discord.com/api/v10/gateway/bot',
-      { headers: { Authorization: `Bot ${DISCORD_TOKEN}` } },
-      8000
-    );
-    if (!r2.ok) {
-      const body = await r2.text();
-      console.error('[PREFLIGHT] /gateway/bot FAILED:', r2.status, body);
-    } else {
-      const gw = await r2.json();
+    // 2) Gateway Bot（觀察 Identify 配額）
+    const gw = await safeFetchJSON('https://discord.com/api/v10/gateway/bot', DISCORD_TOKEN);
+    if (gw?.session_start_limit) {
       console.log('[PREFLIGHT] gatewayBot OK. session_start_limit:', gw.session_start_limit);
+      if (gw.session_start_limit.remaining === 0 && gw.session_start_limit.reset_after) {
+        const wait = Math.ceil(gw.session_start_limit.reset_after);
+        console.warn(`[PREFLIGHT] Identify remaining=0; wait ${wait}ms before login.`);
+        await sleep(wait);
+      }
     }
-  } catch (e) {
-    console.error('[PREFLIGHT] gatewayBot TIMEOUT/ERROR:', e?.message || e);
+  } else {
+    console.log('[PREFLIGHT] Skipped by STARTUP_PREFLIGHT=0');
   }
 
   console.log('[PREFLIGHT] End → calling client.login()');
 
-  client
-    .login(DISCORD_TOKEN)
-    .then(() => console.log('[LOGIN] Login promise resolved'))
-    .catch((err) => console.error('[LOGIN] failed:', err?.message || err));
+  if (!DISCORD_TOKEN) {
+    console.error('[LOGIN] DISCORD_TOKEN missing. Abort login.');
+  } else {
+    client
+      .login(DISCORD_TOKEN)
+      .then(() => console.log('[LOGIN] Login promise resolved'))
+      .catch((err) => console.error('[LOGIN] failed:', err?.message || err));
+  }
 })();
 
 /* =========================
- * Watchdog：15 秒未 READY → 輸出診斷
+ * Watchdog：120 秒未 READY 只提示，不打 REST
  * ========================= */
-setTimeout(async () => {
-  if (!client.isReady?.() && !client.user) {
-    console.error('[WATCHDOG] Client is not READY after 15s.');
-
-    try {
-      const r1 = await fetchWithTimeout(
-        'https://discord.com/api/v10/oauth2/applications/@me',
-        { headers: { Authorization: `Bot ${DISCORD_TOKEN}` } },
-        8000
-      );
-      console.log('[WATCHDOG] /oauth2/applications/@me status:', r1.status);
-    } catch (e) {
-      console.error('[WATCHDOG] oauth2CurrentApplication TIMEOUT/ERROR:', e?.message || e);
-    }
-
-    try {
-      const r2 = await fetchWithTimeout(
-        'https://discord.com/api/v10/gateway/bot',
-        { headers: { Authorization: `Bot ${DISCORD_TOKEN}` } },
-        8000
-      );
-      console.log('[WATCHDOG] /gateway/bot status:', r2.status);
-    } catch (e) {
-      console.error('[WATCHDOG] gatewayBot TIMEOUT/ERROR:', e?.message || e);
-    }
-
-    try {
-      const a = await dnsp.lookup('discord.com');
-      const b = await dnsp.lookup('gateway.discord.gg');
-      console.log('[WATCHDOG] DNS OK:', { discord: a?.address, gateway: b?.address });
-    } catch (e) {
-      console.error('[WATCHDOG] DNS lookup FAILED. Possible egress/DNS issue.', e?.message || e);
-    }
-
+setTimeout(() => {
+  if (!client.isReady?.() || !client.user) {
+    const wsStatus = client?.ws?.status;
+    console.error('[WATCHDOG] Not READY after 120s. ws.status=', wsStatus);
     console.error('[WATCHDOG] Hints:');
-    console.error('- 檢查 Dev Portal 是否勾 Privileged Intents（SERVER MEMBERS、MESSAGE CONTENT）。');
+    console.error('- 檢查 Dev Portal 是否勾 Privileged Intents（SERVER MEMBERS、MESSAGE CONTENT），並且已儲存。');
     console.error('- 確認 Bot 已加入 GUILD_ID 指定的伺服器，且 GUILD_ID 正確。');
-    console.error('- 若仍卡住，請把 [PREFLIGHT]/[LOGIN]/[READY]/[WATCHDOG] 全段輸出貼上來，我來進一步判斷。');
+    console.error('- 避免頻繁重啟：DB 失敗不要立即 exit；健康檢查間隔與超時請放寬。');
+    console.error('- 若 session_start_limit.remaining 用盡，請等待 reset_after 後再進行登入重試。');
   }
-}, 15_000);
+}, 120_000);
+
+/* =========================
+ * 優雅關閉（避免平台殺進程造成無限重啟風暴）
+ * ========================= */
+function gracefulShutdown(signal) {
+  console.log(`[SHUTDOWN] Received ${signal}, destroying client...`);
+  try {
+    client?.destroy?.();
+  } catch {}
+  setTimeout(() => process.exit(0), 1500);
+}
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 /* =========================
  * 全域例外（避免進程直接退出）
