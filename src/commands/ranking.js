@@ -1,49 +1,63 @@
 
+// src/commands/ranking.js
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
-// 你有用到 expNeededForNextLevel 可保留；若未使用也可移除
-const { expNeededForNextLevel } = require('../utils/exp');
+// 若未使用 expNeededForNextLevel 可移除
+// const { expNeededForNextLevel } = require('../utils/exp');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('ranking')
     .setDescription('伺服器排行榜（依等級、總 EXP）'),
+
+  /**
+   * @param {{ interaction: import('discord.js').ChatInputCommandInteraction, models: any }} ctx
+   */
   async execute({ interaction, models: { User } }) {
-    // 1) 從資料庫取前 10 名
-    const list = await User.find({ guildId: interaction.guildId })
-      .sort({ level: -1, totalExp: -1 })
-      .limit(10);
-
-    if (!list.length) {
-      return interaction.reply({ content: '目前沒有資料。', ephemeral: true });
-    }
-
-    // 2) 批次抓取需要的 GuildMember，避免一個一個 fetch
-    const ids = list.map(u => u.userId);
-    let membersMap = new Map();
     try {
-      // 這會回傳 Collection<string, GuildMember>
-      const coll = await interaction.guild.members.fetch({ user: ids });
-      membersMap = coll;
-    } catch (e) {
-      // 有些成員可能已離開或取不到，不影響後續輸出
-      // console.error('批次抓取成員失敗', e);
+      await interaction.deferReply({ ephemeral: false });
+
+      // 1) 前 10 名：等級 desc → 總 EXP desc
+      const list = await User.find({ guildId: interaction.guildId })
+        .sort({ level: -1, totalExp: -1 })
+        .limit(10);
+
+      if (!list.length) {
+        return interaction.editReply({ content: '目前沒有資料。' });
+      }
+
+      // 2) 批次抓取需要的 GuildMember（可能有成員已離開）
+      const ids = list.map(u => u.userId);
+      let membersMap = new Map();
+      try {
+        const coll = await interaction.guild.members.fetch({ user: ids });
+        membersMap = coll;
+      } catch (_) {
+        // 忽略，後面會 fallback mention
+      }
+
+      // 3) 產生每行
+      const lines = list.map((u, idx) => {
+        const member = membersMap.get(u.userId);
+        const name = member ? member.displayName : `<@${u.userId}>`;
+        return `#${idx + 1} **${name}** — Lv.${u.level}（總 EXP：${u.totalExp || 0}）`;
+      });
+
+      // 4) 回覆 Embed
+      const embed = new EmbedBuilder()
+        .setColor(0xFF8F00)
+        .setTitle('伺服器排行榜 TOP 10')
+        .setDescription(lines.join('\n'))
+        .setTimestamp();
+
+      await interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+      console.error('[/ranking] error:', err);
+      try {
+        if (!interaction.deferred && !interaction.replied) {
+          await interaction.reply({ content: '處理排行榜時發生錯誤。', ephemeral: true });
+        } else {
+          await interaction.editReply({ content: '處理排行榜時發生錯誤。' });
+        }
+      } catch (_) {}
     }
-
-    // 3) 產生每一行文字：暱稱優先（displayName），抓不到則回退到 userId
-    const lines = list.map((u, idx) => {
-      const member = membersMap.get(u.userId);
-      // ✅ 使用伺服器內暱稱（沒有暱稱時 displayName 會等於 username）
-      const name = member ? member.displayName : u.userId;
-      return `#${idx + 1} **${name}** — Lv.${u.level}（總 EXP：${u.totalExp}）`;
-    });
-
-    // 4) 回覆 Embed
-    const embed = new EmbedBuilder()
-      .setColor(0xFF8F00)
-      .setTitle('伺服器排行榜 TOP 10')
-      .setDescription(lines.join('\n')) // 用 '\n' 串接
-      .setTimestamp();
-
-    await interaction.reply({ embeds: [embed], ephemeral: false });
   }
-};
