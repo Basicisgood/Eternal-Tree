@@ -1,7 +1,6 @@
-
 // src/commands/ranking.js
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
-// 若未使用 expNeededForNextLevel 可移除
+// 若未使用 expNeededForNextLevel 可移除下一行
 // const { expNeededForNextLevel } = require('../utils/exp');
 
 module.exports = {
@@ -14,9 +13,10 @@ module.exports = {
    */
   async execute({ interaction, models: { User } }) {
     try {
+      // 先 ACK，避免 3 秒超時
       await interaction.deferReply({ ephemeral: false });
 
-      // 1) 前 10 名：等級 desc → 總 EXP desc
+      // 1) 拉前 10 名：等級 desc → 總 EXP desc
       const list = await User.find({ guildId: interaction.guildId })
         .sort({ level: -1, totalExp: -1 })
         .limit(10);
@@ -25,21 +25,21 @@ module.exports = {
         return interaction.editReply({ content: '目前沒有資料。' });
       }
 
-      // 2) 批次抓取需要的 GuildMember（可能有成員已離開）
+      // 2) 批次抓成員（可能有人已離開，抓不到時略過）
       const ids = list.map(u => u.userId);
       let membersMap = new Map();
       try {
         const coll = await interaction.guild.members.fetch({ user: ids });
-        membersMap = coll;
+        membersMap = coll; // Collection<string, GuildMember>
       } catch (_) {
-        // 忽略，後面會 fallback mention
+        // 忽略錯誤，後面會 fallback mention
       }
 
-      // 3) 產生每行
+      // 3) 生成排行榜文字：優先伺服器暱稱，抓不到就用 mention
       const lines = list.map((u, idx) => {
         const member = membersMap.get(u.userId);
-        const name = member ? member.displayName : `<@${u.userId}>`;
-        return `#${idx + 1} **${name}** — Lv.${u.level}（總 EXP：${u.totalExp || 0}）`;
+        const display = member ? member.displayName : `<@${u.userId}>`;
+        return `#${idx + 1} **${display}** — Lv.${u.level}（總 EXP：${u.totalExp || 0}）`;
       });
 
       // 4) 回覆 Embed
@@ -60,4 +60,5 @@ module.exports = {
         }
       } catch (_) {}
     }
-  }
+  },
+};
