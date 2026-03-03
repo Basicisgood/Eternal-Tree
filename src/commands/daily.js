@@ -1,4 +1,3 @@
-
 // src/commands/daily.js
 const { SlashCommandBuilder } = require('discord.js');
 
